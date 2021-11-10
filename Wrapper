@@ -1,0 +1,249 @@
+
+# Title:     Oracle Java 8 Update 281 x86 - Multiple MSI/Patch/Setup Install Script.
+# Version:   1.0.0
+# Typ:       Install
+# Author:    Magnus Karlsson
+# Contact:   magnus.karlsson@atea.com 
+# Date:      2021-02-13
+#        
+# Command:   powershell.exe -ExecutionPolicy Bypass -File ".\install.ps1" -deploymenttype install
+# Detection: HKLM: 
+             
+[CmdletBinding(SupportsShouldProcess = $true)]
+
+Param (
+    [parameter(Mandatory = $true, HelpMessage = "Install or Uninstall")]
+    [ValidateSet("Install","Uninstall")] 
+	[string] $DeploymentType = "Install" 
+)
+
+Begin {}
+Process {
+
+$DPath = 'SCCMdetection\{26A24AE4-039D-4CA4-87B4-2F32180281F0}' 
+
+#$Guids = "{26A24AE4-039D-4CA4-87B4-2F32180181F0}",
+            # "{26A24AE4-039D-4CA4-87B4-2F32180191F0}",
+            # "{26A24AE4-039D-4CA4-87B4-2F32180201F0}",
+            # "{26A24AE4-039D-4CA4-87B4-2F32180211F0}",
+            # "{26A24AE4-039D-4CA4-87B4-2F32180231F0}",
+            # "{26A24AE4-039D-4CA4-87B4-2F32180241F0}",
+            # "{26A24AE4-039D-4CA4-87B4-2F32180251F0}",
+            # "{26A24AE4-039D-4CA4-87B4-2F32180261F0}",
+            # "{26A24AE4-039D-4CA4-87B4-2F32180271F0}",
+            # "{26A24AE4-039D-4CA4-87B4-2F32180281F0}"
+
+
+                        
+ #Get path from where the script runs.
+ $path = split-path $SCRIPT:MyInvocation.MyCommand.Path -parent
+
+
+ $_ExitCode = 0 
+
+
+    Function RunCommand($_Command, $_Arguments) {
+
+
+      Write-Output "$_Command $_Arguments"
+      $Install = Start-Process $_Command -ArgumentList $_Arguments -PassThru 
+      Wait-Process -InputObject $Install
+       
+      Write-Output $Install.ExitCode
+      CheckExitCode $Install.ExitCode
+
+      }
+
+    Function ExecuteMSI($Command, $iArgs, $xArgs) {
+        switch ($DeploymentType) 
+            {
+             "Uninstall" {RunCommand $Command $xArgs}
+             "Install" {RunCommand $Command $iArgs}
+            }
+    }
+
+    Function CheckExitCode([string]$_LastExitCode) {
+
+
+      if ($_LastExitCode -ne 0 -and $_LastExitCode -ne 3010 -and $_LastExitCode -ne 1605) { 
+          
+          # If any error occured, then script execution is terminated and error code is returned.
+          Echo $_LastExitCode
+          $host.exit 
+          
+          }
+      elseif ($_LastExitCode -eq 3010) {
+            
+            # If ReturnCode is "3010", set this value for VB Script return code and continue installation.
+            $_ExitCode = $_LastExitCode
+           
+          }
+
+
+      }
+
+
+
+      function get-msifileinformation ([System.IO.FileInfo]$Pathx, $Property)
+      {
+
+        # Read property from MSI database
+        $WindowsInstaller = New-Object -ComObject WindowsInstaller.Installer
+        $MSIDatabase = $WindowsInstaller.GetType().InvokeMember("OpenDatabase", "InvokeMethod", $null, $WindowsInstaller, @($Pathx.FullName, 0))
+        $Query = "SELECT Value FROM Property WHERE Property = '$($Property)'"
+        $View = $MSIDatabase.GetType().InvokeMember("OpenView", "InvokeMethod", $null, $MSIDatabase, ($Query))
+        $View.GetType().InvokeMember("Execute", "InvokeMethod", $null, $View, $null)
+        $Record = $View.GetType().InvokeMember("Fetch", "InvokeMethod", $null, $View, $null)
+        $Value = $Record.GetType().InvokeMember("StringData", "GetProperty", $null, $Record, 1)
+ 
+        # Commit database and close view
+        $MSIDatabase.GetType().InvokeMember("Commit", "InvokeMethod", $null, $MSIDatabase, $null)
+        $View.GetType().InvokeMember("Close", "InvokeMethod", $null, $View, $null)           
+        $MSIDatabase = $null
+        $View = $null
+        return $Value
+      }
+
+
+
+
+#===== START ====================================================================================
+
+
+# 1. Uninstall prev. Java builds
+    
+   #Stop process  
+   Get-WmiObject Win32_Process | Where {$_.ExecutablePath -like '*Program Files\Java\*'} |  
+    Select @{n='Name';e={$_.Name.Split('.')[0]}} | Stop-Process -Force 
+ 
+   get-process -Name *iexplore* | Stop-Process -Force -ErrorAction SilentlyContinue 
+
+
+   #Uninstall all prev. Java builds
+   $RegUninstallPaths = @( 
+        'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall', 
+        'HKLM:\SOFTWARE\Wow6432Node\Microsoft\Windows\CurrentVersion\Uninstall') 
+
+
+   $UninstallSearchFilter = { ($_.GetValue('DisplayName') -like '*Java*') }  
+
+   foreach ($RegPath in $RegUninstallPaths) { 
+
+            if (Test-Path $RegPath) 
+            { 
+
+                $guids = Get-ChildItem $RegPath | Where $UninstallSearchFilter | Foreach { $_.PSChildName }
+                 
+                 foreach ($guid in $guids)
+                 {
+                 
+
+                     if ($guid -ne $Null) {
+
+                       $Args = @(
+                        "/x"
+                        "$guid"
+                         "/qn /norestart"
+                     
+                        )
+
+                        #Uninstall program
+                        RunCommand 'msiexec.exe' $Args
+                    
+                        #remove reg.post
+                        $post = (Join-Path -Path "HKLM:\Software\SCCMdetection\" -ChildPath $guid)
+                        if (Test-Path $post) 
+                        { 
+                        Remove-Item -path $post -Force
+                        }
+
+                      }
+
+
+                 } 
+
+             }
+         }
+
+
+
+
+    
+# 2. Create exception.sites
+
+    if ($DeploymentType -eq "Install") {
+
+        if (-not (test-path C:\Windows\Sun\Java\Deployment\exception.sites)) { 
+           New-Item -Path 'C:\Windows\Sun\Java\Deployment' -ItemType 'Directory' -Force
+           Copy-Item (Join-Path $path "exception.sites") 'C:\Windows\Sun\Java\Deployment\' -Force 
+        }
+    
+        if (-not (test-path C:\ProgramData\Oracle\Java)) {
+           New-Item -Path 'C:\ProgramData\Oracle\Java' -ItemType 'Directory' -Force
+        }
+     
+        Copy-Item (Join-Path $path "deployment.properties") 'C:\Windows\Sun\Java\Deployment\' -Force
+        Copy-Item (Join-Path $path "deployment.config") 'C:\Windows\Sun\Java\Deployment\' -Force
+        Copy-Item (Join-Path $path "java.settings.cfg") 'C:\ProgramData\Oracle\Java\' -Force
+        
+    }
+
+    
+
+
+# 3. Oracle Java 8 Update 281 version 1.8.0_281
+      
+    if ($DeploymentType -eq "Install") {
+
+     $Command = "msiexec.exe"
+     $guid = "{26A24AE4-039D-4CA4-87B4-2F32180281F0}"
+     $msi = join-path -Path $path -ChildPath "jre1.8.0_281full.msi"
+     $iArgs = @(
+        "/i"
+        """$msi"""
+        "REBOOT=ReallySuppress"
+         "/q"
+        )
+  
+     RunCommand $Command $iArgs
+
+     }
+
+
+
+
+# 4.  Copy deployment.properties
+   
+   if ($DeploymentType -eq "Install") {
+
+    Copy-Item (Join-Path $path "deployment.properties") 'C:\Windows\Sun\Java\Deployment\' -Force 
+   
+   } 
+   
+
+
+     
+# 5. Add/Remove detection guid generated by Atea
+ 
+
+      switch ($DeploymentType) 
+            {
+             "Uninstall" {
+                        #remove reg.post
+                        $post = (Join-Path -Path "HKLM:\Software" -ChildPath $DPath)
+                        if (Test-Path $post) 
+                        { 
+                        Remove-Item -path $post -Force
+                        }
+                     }
+             "Install" {New-Item -path (Join-Path -Path "HKLM:\Software" -ChildPath $DPath) -Force}
+            }
+    
+
+    Echo $_ExitCode
+    
+
+
+#===== END ====================================================================================
+
+}
